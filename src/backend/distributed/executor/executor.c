@@ -995,7 +995,7 @@ RunDistributedExecution(DistributedExecution *execution)
 	/* allocate events for the maximum number of connections to avoid realloc */
 	WaitEvent *events = palloc0(execution->totalTaskCount * workerCount *
 								sizeof(WaitEvent));
-	WaitEventSet *waitEventSet = BuildWaitEventSet(execution->sessionList);
+	WaitEventSet *waitEventSet = NULL;
 
 	PG_TRY();
 	{
@@ -1015,9 +1015,14 @@ RunDistributedExecution(DistributedExecution *execution)
 				ManageWorkerPool(workerPool);
 			}
 
-			if (execution->connectionSetChanged)
+			if (execution->connectionSetChanged || waitEventSet == NULL)
 			{
-				FreeWaitEventSet(waitEventSet);
+				if (waitEventSet != NULL)
+				{
+					FreeWaitEventSet(waitEventSet);
+					waitEventSet = NULL;
+				}
+
 				waitEventSet = BuildWaitEventSet(execution->sessionList);
 				execution->connectionSetChanged = false;
 				execution->waitFlagsChanged = false;
@@ -1079,7 +1084,11 @@ RunDistributedExecution(DistributedExecution *execution)
 		}
 
 		pfree(events);
-		FreeWaitEventSet(waitEventSet);
+
+		if (waitEventSet != NULL)
+		{
+			FreeWaitEventSet(waitEventSet);
+		}
 	}
 	PG_CATCH();
 	{
@@ -1090,7 +1099,11 @@ RunDistributedExecution(DistributedExecution *execution)
 		UnclaimAllSessionConnections(execution->sessionList);
 
 		pfree(events);
-		FreeWaitEventSet(waitEventSet);
+
+		if (waitEventSet != NULL)
+		{
+			FreeWaitEventSet(waitEventSet);
+		}
 
 		PG_RE_THROW();
 	}
