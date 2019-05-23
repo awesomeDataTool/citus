@@ -73,6 +73,9 @@ typedef struct DistributedExecution
 	 */
 	bool waitFlagsChanged;
 
+	/* WaitEventSet used for waiting for I/O events */
+	WaitEventSet *waitEventSet;
+
 	/*
 	 * The number of connections we aim to open per worker.
 	 *
@@ -995,11 +998,13 @@ RunDistributedExecution(DistributedExecution *execution)
 	/* allocate events for the maximum number of connections to avoid realloc */
 	WaitEvent *events = palloc0(execution->totalTaskCount * workerCount *
 								sizeof(WaitEvent));
-	WaitEventSet *waitEventSet = NULL;
 
 	PG_TRY();
 	{
 		bool cancellationReceived = false;
+
+		/* we'll build this at first iteration */
+		execution->waitEventSet = NULL;
 
 		while (execution->unfinishedTaskCount > 0 && !cancellationReceived)
 		{
@@ -1015,30 +1020,36 @@ RunDistributedExecution(DistributedExecution *execution)
 				ManageWorkerPool(workerPool);
 			}
 
-			if (execution->connectionSetChanged || waitEventSet == NULL)
+			if (execution->connectionSetChanged || execution->waitEventSet == NULL)
 			{
-				if (waitEventSet != NULL)
+				if (execution->waitEventSet != NULL)
 				{
-					FreeWaitEventSet(waitEventSet);
-					waitEventSet = NULL;
+					FreeWaitEventSet(execution->waitEventSet);
+
+					/*
+					 * BuildWaitEventSet() can throw errors, which will transfer
+					 * the control to PG_CATCH(). We set this to NULL so we know
+					 * we don't have any WaitEventSets to free at this point.
+					 */
+					execution->waitEventSet = NULL;
 				}
 
-				waitEventSet = BuildWaitEventSet(execution->sessionList);
+				execution->waitEventSet = BuildWaitEventSet(execution->sessionList);
 				execution->connectionSetChanged = false;
 				execution->waitFlagsChanged = false;
 			}
 			else if (execution->waitFlagsChanged)
 			{
-				UpdateWaitEventSetFlags(waitEventSet, execution->sessionList);
+				UpdateWaitEventSetFlags(execution->waitEventSet, execution->sessionList);
 				execution->waitFlagsChanged = false;
 			}
 
 			/* wait for I/O events */
 #if (PG_VERSION_NUM >= 100000)
-			eventCount = WaitEventSetWait(waitEventSet, timeout, events,
+			eventCount = WaitEventSetWait(execution->waitEventSet, timeout, events,
 										  connectionCount + 2, WAIT_EVENT_CLIENT_READ);
 #else
-			eventCount = WaitEventSetWait(waitEventSet, timeout, events,
+			eventCount = WaitEventSetWait(execution->waitEventSet, timeout, events,
 										  connectionCount + 2);
 #endif
 
@@ -1085,9 +1096,9 @@ RunDistributedExecution(DistributedExecution *execution)
 
 		pfree(events);
 
-		if (waitEventSet != NULL)
+		if (execution->waitEventSet != NULL)
 		{
-			FreeWaitEventSet(waitEventSet);
+			FreeWaitEventSet(execution->waitEventSet);
 		}
 	}
 	PG_CATCH();
@@ -1100,9 +1111,9 @@ RunDistributedExecution(DistributedExecution *execution)
 
 		pfree(events);
 
-		if (waitEventSet != NULL)
+		if (execution->waitEventSet != NULL)
 		{
-			FreeWaitEventSet(waitEventSet);
+			FreeWaitEventSet(execution->waitEventSet);
 		}
 
 		PG_RE_THROW();
