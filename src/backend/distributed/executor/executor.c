@@ -73,7 +73,16 @@ typedef struct DistributedExecution
 	 */
 	bool waitFlagsChanged;
 
-	/* WaitEventSet used for waiting for I/O events */
+	/*
+	 * WaitEventSet used for waiting for I/O events.
+	 *
+	 * This could also be local to RunDistributedExecution(), but in that case
+	 * we had to mark it as "volatile" to avoid PG_TRY()/PG_CATCH() issues, and
+	 * cast it to non-volatile when doing WaitEventSetFree(). We thought that
+	 * would make code a bit harder to read than making this non-local, so we
+	 * move it here. See comments for PG_TRY() in postgres/src/include/elog.h
+	 * and "man 3 siglongjmp" for more context.
+	 */
 	WaitEventSet *waitEventSet;
 
 	/*
@@ -1003,8 +1012,7 @@ RunDistributedExecution(DistributedExecution *execution)
 	{
 		bool cancellationReceived = false;
 
-		/* we'll build this at first iteration */
-		execution->waitEventSet = NULL;
+		execution->waitEventSet = BuildWaitEventSet(execution->sessionList);
 
 		while (execution->unfinishedTaskCount > 0 && !cancellationReceived)
 		{
@@ -1020,20 +1028,9 @@ RunDistributedExecution(DistributedExecution *execution)
 				ManageWorkerPool(workerPool);
 			}
 
-			if (execution->connectionSetChanged || execution->waitEventSet == NULL)
+			if (execution->connectionSetChanged)
 			{
-				if (execution->waitEventSet != NULL)
-				{
-					FreeWaitEventSet(execution->waitEventSet);
-
-					/*
-					 * BuildWaitEventSet() can throw errors, which will transfer
-					 * the control to PG_CATCH(). We set this to NULL so we know
-					 * we don't have any WaitEventSets to free at this point.
-					 */
-					execution->waitEventSet = NULL;
-				}
-
+				FreeWaitEventSet(execution->waitEventSet);
 				execution->waitEventSet = BuildWaitEventSet(execution->sessionList);
 				execution->connectionSetChanged = false;
 				execution->waitFlagsChanged = false;
@@ -1095,11 +1092,7 @@ RunDistributedExecution(DistributedExecution *execution)
 		}
 
 		pfree(events);
-
-		if (execution->waitEventSet != NULL)
-		{
-			FreeWaitEventSet(execution->waitEventSet);
-		}
+		FreeWaitEventSet(execution->waitEventSet);
 	}
 	PG_CATCH();
 	{
@@ -1110,11 +1103,7 @@ RunDistributedExecution(DistributedExecution *execution)
 		UnclaimAllSessionConnections(execution->sessionList);
 
 		pfree(events);
-
-		if (execution->waitEventSet != NULL)
-		{
-			FreeWaitEventSet(execution->waitEventSet);
-		}
+		FreeWaitEventSet(execution->waitEventSet);
 
 		PG_RE_THROW();
 	}
